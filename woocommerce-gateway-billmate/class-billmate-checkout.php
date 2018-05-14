@@ -60,6 +60,15 @@ class WC_Gateway_Billmate_Checkout extends WC_Gateway_Billmate
             'billmate_update_address'
         ) );
 
+        add_action( 'wp_ajax_billmate_update_order', array(
+            $this,
+            'billmate_update_order'
+        ) );
+        add_action( 'wp_ajax_nopriv_billmate_update_order', array(
+            $this,
+            'billmate_update_order'
+        ) );
+
         // Update Address from Iframe
         add_action( 'wp_ajax_billmate_set_method', array(
             $this,
@@ -102,19 +111,33 @@ class WC_Gateway_Billmate_Checkout extends WC_Gateway_Billmate
 
         add_action( 'woocommerce_api_wc_gateway_billmate_checkout', array( $this, 'check_ipn_response' ) );
 
+        add_filter( 'the_content', 'WC_Gateway_Billmate_Checkout::filter_the_content', 1000, 3 );
+    }
+
+    /**
+     * When Billmate Checkout page Replace page content with countent found in Billmate Checkout template
+     * @return string $content HTML page content
+     */
+    public static function filter_the_content($content)
+    {
+        global $post;
+        $checkoutSettings = get_option("woocommerce_billmate_checkout_settings", array());
+        if(isset($checkoutSettings['checkout_url']) AND $checkoutSettings['checkout_url'] == $post->ID) {
+            $template_filename = plugin_dir_path( __FILE__ ) . 'templates' . DIRECTORY_SEPARATOR . 'billmate-checkout.php';
+            ob_start();
+            load_template($template_filename, false);
+            return ob_get_clean();
+        }
+        return $content;
     }
 
     public function get_title() {
         return $this->method_title;
     }
 
-    function change_to_bco($url){
-        if(!is_admin()) {
-            if($this->enabled == 'yes') {
-                $checkout_url = get_post($this->checkout_url);
-
-                return $checkout_url->guid;
-            }
+    function change_to_bco($url) {
+        if (is_admin() != true && 'yes' == $this->enabled && is_numeric($this->checkout_url) && $this->checkout_url > 0) {
+            return get_permalink($this->checkout_url);
         }
         return $url;
     }
@@ -191,7 +214,7 @@ class WC_Gateway_Billmate_Checkout extends WC_Gateway_Billmate
         if(!isset($result['code'])) {
             $class = '';
 
-            $orderId = $this->create_order();
+            $orderId = $this->save_wc_order();
             $order = wc_get_order( $orderId );
             // Clear invoice fee
             switch ($result['PaymentData']['method']) {
@@ -356,132 +379,303 @@ class WC_Gateway_Billmate_Checkout extends WC_Gateway_Billmate
 
     }
 
-    function billmate_update_address(){
-        global $woocommerce;
-        global $wp_version;
-
+    public function billmate_update_order()
+    {
+        /* Reload checkout page if item is out of stock */
         $check_cart_item_stock_result = WC()->cart->check_cart_item_stock();
         if (!is_bool($check_cart_item_stock_result) || (is_bool($check_cart_item_stock_result) && true != $check_cart_item_stock_result)) {
-            // cart item is out of stock, need page reload
             wp_send_json_success(array('reload_checkout' => true));
             return false;
         }
 
-        $connection = $this->getBillmateConnection();
-        $result = array("code" => "no hash");
+        $post = (isset($_POST)) ? $_POST : '';
+        $get = (isset($_GET)) ? $_GET : '';
+        $request = (isset($_REQUEST)) ? $_REQUEST : '';
 
+        $result = array("code" => "no hash");
         $hash = WC()->session->get('billmate_checkout_hash');
         if($hash != "") {
+            $connection = $this->getBillmateConnection();
             $result = $connection->getCheckout(array('PaymentData' => array('hash' => $hash)));
         }
-
         if($hash != "" AND isset($result['code']) == false){
-
-            $orderId = $this->create_order();
+            $orderId = $this->save_wc_order();
             $order = wc_get_order( $orderId );
-
-            if(isset($result['Customer']) AND is_array($result['Customer']) AND count($result['Customer']) > 0) {
-                $billing_address = array(
-                    'first_name' => $result['Customer']['Billing']['firstname'],
-                    'last_name'  => $result['Customer']['Billing']['lastname'],
-                    'company'    => (isset($result['Customer']['Billing']['company']) ? $result['Customer']['Billing']['company'] : ''),
-                    'email'      => $result['Customer']['Billing']['email'],
-                    'phone'      => $result['Customer']['Billing']['phone'],
-                    'address_1'  => $result['Customer']['Billing']['street'],
-                    'address_2'  => '',
-                    'city'       => $result['Customer']['Billing']['city'],
-                    'state'      => '',
-                    'postcode'   => $result['Customer']['Billing']['zip'],
-                    'country'    => $result['Customer']['Billing']['country']
-                );
-
-                if(isset($result['Customer']['Shipping']) AND is_array($result['Customer']['Shipping']) AND count($result['Customer']['Shipping']) > 0) {
-                    $shipping_address = array(
-                        'first_name' => $result['Customer']['Shipping']['firstname'],
-                        'last_name'  => $result['Customer']['Shipping']['lastname'],
-                        'company'    => (isset($result['Customer']['Shipping']['company']) ? $result['Customer']['Shipping']['company'] : ''),
-                        'email'      => $result['Customer']['Shipping']['email'],
-                        'phone'      => $result['Customer']['Shipping']['phone'],
-                        'address_1'  => $result['Customer']['Shipping']['street'],
-                        'address_2'  => '',
-                        'city'       => $result['Customer']['Shipping']['city'],
-                        'state'      => '',
-                        'postcode'   => $result['Customer']['Shipping']['zip'],
-                        'country'    => $result['Customer']['Shipping']['country']
-                    );
-                } else {
-                    $shipping_address = $billing_address;
-                }
-
-                $billingEmail = isset($result['Customer']['Billing']['email']) ? sanitize_text_field($result['Customer']['Billing']['email']) : '';
-                $isEmail = is_email($billingEmail);
-                if ($isEmail != false AND is_string($isEmail) AND $isEmail == $billingEmail) {
-                    // Email is valid, continue
-                    $order->set_address($billing_address,'billing');
-                    $order->set_address($shipping_address,'shipping');
-                } else {
-                    /* Email not valid */
-                    if (version_compare($wp_version, '2.8.0', '>=') AND version_compare(WC_VERSION, '3.1.0', '>=')) {
-                         /* To prevent " PHP Fatal error:  Uncaught exception 'WC_Data_Exception'  " for WP 4.8 and WC 3.1 when invalid email, do not use set_address for setting order billing email */
-
-                        if (isset($billing_address['email'])) {
-                            unset($billing_address['email']);
-                        }
-
-                        $order->set_address($billing_address, 'billing');
-                        $order->set_address($shipping_address, 'shipping');
-                        update_metadata('post', $order->get_id(), '_billing_email', $billingEmail);
-
-                    } else {
-                        $order->set_address($billing_address, 'billing');
-                        $order->set_address($shipping_address, 'shipping');
-                    }
-                }
-            }
-
-            switch ($result['PaymentData']['method']) {
-                case 1:
-                    $method = 'billmate_invoice';
-                    //$class = new WC_Gateway_Billmate_Invoice();
-
-                    break;
-                case 4:
-                    $method = 'billmate_partpayment';
-                    //$class = new WC_Gateway_Billmate_Partpayment();
-                    break;
-                case 8:
-                    $method = 'billmate_cardpay';
-                    $result['PaymentData']['accepturl']    = billmate_add_query_arg(array('wc-api' => 'WC_Gateway_Billmate_Cardpay', 'payment' => 'success','method' => 'checkout'));
-                    $result['PaymentData']['callbackurl']  = billmate_add_query_arg(array('wc-api' => 'WC_Gateway_Billmate_Cardpay', 'method' => 'checkout'));
-                    $result['PaymentData']['cancelurl']    = billmate_add_query_arg(array('wc-api' => 'WC_Gateway_Billmate_Cardpay', 'payment' => 'cancel','method' => 'checkout'));
-                    $result['PaymentData']['returnmethod'] = is_ssl() ? 'POST' : 'GET';
-                    //$class = new WC_Gateway_Billmate_Cardpay();
-                    break;
-                case 16:
-                    $method = 'billmate_bankpay';
-                    $result['PaymentData']['accepturl']    = billmate_add_query_arg(array('wc-api' => 'WC_Gateway_Billmate_Bankpay', 'payment' => 'success','method' => 'checkout'));
-                    $result['PaymentData']['callbackurl']  = billmate_add_query_arg(array('wc-api' => 'WC_Gateway_Billmate_Bankpay', 'method' => 'checkout'));
-                    $result['PaymentData']['cancelurl']    = billmate_add_query_arg(array('wc-api' => 'WC_Gateway_Billmate_Bankpay', 'payment' => 'cancel','method' => 'checkout'));
-                    $result['PaymentData']['returnmethod'] = is_ssl() ? 'POST' : 'GET';
-                    //$class = new WC_Gateway_Billmate_Bankpay();
-                    break;
-            }
-            $available_gateways = WC()->payment_gateways->payment_gateways();
-            if(isset($method) AND $method != "" AND isset($available_gateways[$method])) {
-                $payment_method = $available_gateways[$method];
-                $order->set_payment_method($payment_method);
-            }
 
             $order->calculate_taxes();
             $order->calculate_shipping();
             $order->calculate_totals();
+
             $data = $this->updateCheckout($result, $order);
             wp_send_json_success($data);
         }
         wp_send_json_error();
     }
 
+    public function billmate_update_address()
+    {
+        if(version_compare(WC_VERSION, '3.0.0', '>=')) {
+            $this->save_wc3_customer();
+        } else {
+            $this->save_wc2_customer();
+        }
+    }
+
+    public function save_wc2_customer()
+    {
+        $orderId = $this->save_wc_order();
+        $order = wc_get_order( $orderId );
+
+        $post = $_POST;
+
+        if( isset($post['Customer'])
+            && is_array($post['Customer'])
+            && count($post['Customer']) > 0
+            && isset($post['Customer']['Billing'])
+            && isset($post['Customer']['Billing']['email'])
+            && $post['Customer']['Billing']['email'] != ''
+        ) {
+            $billing_address = array(
+                'first_name' => $post['Customer']['Billing']['firstname'],
+                'last_name'  => $post['Customer']['Billing']['lastname'],
+                'company'    => (isset($post['Customer']['Billing']['company']) ? $post['Customer']['Billing']['company'] : ''),
+                'email'      => $post['Customer']['Billing']['email'],
+                'phone'      => $post['Customer']['Billing']['phone'],
+                'address_1'  => $post['Customer']['Billing']['street'],
+                'address_2'  => '',
+                'city'       => $post['Customer']['Billing']['city'],
+                'state'      => '',
+                'postcode'   => $post['Customer']['Billing']['zip'],
+                'country'    => $post['Customer']['Billing']['country']
+            );
+
+            if( isset($post['Customer']['Shipping'])
+                && is_array($post['Customer']['Shipping'])
+                && count($post['Customer']['Shipping']) > 0
+                && isset($post['Customer']['Shipping']['firstname'])
+                && isset($post['Customer']['Shipping']['lastname'])
+                && isset($post['Customer']['Shipping']['street'])
+                && isset($post['Customer']['Shipping']['city'])
+                && isset($post['Customer']['Shipping']['zip'])
+                && $post['Customer']['Shipping']['firstname'] != ''
+                && $post['Customer']['Shipping']['lastname'] != ''
+                && $post['Customer']['Shipping']['street'] != ''
+                && $post['Customer']['Shipping']['city'] != ''
+                && $post['Customer']['Shipping']['zip'] != ''
+            ) {
+                $shipping_address = array(
+                    'first_name' => $post['Customer']['Shipping']['firstname'],
+                    'last_name'  => $post['Customer']['Shipping']['lastname'],
+                    'company'    => (isset($post['Customer']['Shipping']['company']) ? $post['Customer']['Shipping']['company'] : ''),
+                    'email'      => $post['Customer']['Shipping']['email'],
+                    'phone'      => $post['Customer']['Shipping']['phone'],
+                    'address_1'  => $post['Customer']['Shipping']['street'],
+                    'address_2'  => '',
+                    'city'       => $post['Customer']['Shipping']['city'],
+                    'state'      => '',
+                    'postcode'   => $post['Customer']['Shipping']['zip'],
+                    'country'    => ''
+                );
+                if (isset($post['Customer']['Shipping']['country']) && $post['Customer']['Shipping']['country'] != '') {
+                    $shipping_address['country'] = $post['Customer']['Shipping']['country'];
+                } else {
+                    $shipping_address['country'] = $billing_address['country'];
+                }
+            } else {
+                $shipping_address = $billing_address;
+            }
+
+            foreach ($billing_address AS $key => $val) {
+                $billing_address[$key] = sanitize_text_field( $val );
+            }
+            foreach ($shipping_address AS $key => $val) {
+                $shipping_address[$key] = sanitize_text_field( $val );
+            }
+
+            $order_billing_address = $order->get_address( 'billing' );
+            $order_shipping_address = $order->get_address( 'shipping' );
+
+            // Save address when changed
+            if (
+                $order_billing_address['first_name'] != $billing_address['first_name']
+                || $order_billing_address['last_name'] != $billing_address['last_name']
+                || $order_billing_address['country'] != strtoupper( $billing_address['country'] )
+                || $order_billing_address['address_1'] != $billing_address['address_1']
+                || $order_billing_address['address_2'] != $billing_address['address_2']
+                || $order_billing_address['city'] != $billing_address['city']
+                || $order_billing_address['postcode'] != $billing_address['postcode']
+                || $order_billing_address['phone'] != $billing_address['phone']
+                || $order_billing_address['email'] != $billing_address['email']
+
+                || $order_shipping_address['first_name'] != $shipping_address['first_name']
+                || $order_shipping_address['last_name'] != $shipping_address['last_name']
+                || $order_shipping_address['country'] != strtoupper( $shipping_address['country'] )
+                || $order_shipping_address['address_1'] != $shipping_address['address_1']
+                || $order_shipping_address['address_2'] != $shipping_address['address_2']
+                || $order_shipping_address['city'] != $shipping_address['city']
+                || $order_shipping_address['postcode'] != $shipping_address['postcode']
+            ) {
+                $isEmail = is_email($billing_address['email']);
+                if ($isEmail != false AND is_string($isEmail) AND $isEmail == $billing_address['email']) {
+                    // Email is valid, continue
+                    $order->set_address($billing_address,'billing');
+                    $order->set_address($shipping_address,'shipping');
+                } else {
+                    /* Email not valid */
+                    if (version_compare(WC_VERSION, '2.8.0', '>=') AND version_compare(WC_VERSION, '3.1.0', '>=')) {
+                        // Prevent exception when invalid email
+                        if (isset($billing_address['email'])) {
+                            unset($billing_address['email']);
+                        }
+
+                        $order->set_address($billing_address, 'billing');
+                        $order->set_address($shipping_address, 'shipping');
+                        update_metadata('post', $order->get_id(), '_billing_email', $billing_address['email']);
+
+                    } else {
+                        $order->set_address($billing_address, 'billing');
+                        $order->set_address($shipping_address, 'shipping');
+                    }
+                }
+
+                $order->calculate_taxes();
+                $order->calculate_shipping();
+                $order->calculate_totals();
+
+                wp_send_json_success(array('update_checkout' => true));
+            } else {
+                wp_send_json_success(array('update_checkout' => false));
+            }
+            wp_send_json_success(array('update_checkout' => false));
+        }
+        wp_send_json_error();
+    }
+
+    public function save_wc3_customer()
+    {
+        $post = $_POST;
+
+        if( isset($post['Customer'])
+            && is_array($post['Customer'])
+            && count($post['Customer']) > 0
+            && isset($post['Customer']['Billing'])
+            && isset($post['Customer']['Billing']['email'])
+            && $post['Customer']['Billing']['email'] != ''
+        ) {
+            $billing_address = array(
+                'first_name' => $post['Customer']['Billing']['firstname'],
+                'last_name'  => $post['Customer']['Billing']['lastname'],
+                'company'    => (isset($post['Customer']['Billing']['company']) ? $post['Customer']['Billing']['company'] : ''),
+                'email'      => $post['Customer']['Billing']['email'],
+                'phone'      => $post['Customer']['Billing']['phone'],
+                'address_1'  => $post['Customer']['Billing']['street'],
+                'address_2'  => '',
+                'city'       => $post['Customer']['Billing']['city'],
+                'state'      => '',
+                'postcode'   => $post['Customer']['Billing']['zip'],
+                'country'    => $post['Customer']['Billing']['country']
+            );
+
+            if( isset($post['Customer']['Shipping'])
+                && is_array($post['Customer']['Shipping'])
+                && count($post['Customer']['Shipping']) > 0
+                && isset($post['Customer']['Shipping']['firstname'])
+                && isset($post['Customer']['Shipping']['lastname'])
+                && isset($post['Customer']['Shipping']['street'])
+                && isset($post['Customer']['Shipping']['city'])
+                && isset($post['Customer']['Shipping']['zip'])
+                && $post['Customer']['Shipping']['firstname'] != ''
+                && $post['Customer']['Shipping']['lastname'] != ''
+                && $post['Customer']['Shipping']['street'] != ''
+                && $post['Customer']['Shipping']['city'] != ''
+                && $post['Customer']['Shipping']['zip'] != ''
+            ) {
+                $shipping_address = array(
+                    'first_name' => $post['Customer']['Shipping']['firstname'],
+                    'last_name'  => $post['Customer']['Shipping']['lastname'],
+                    'company'    => (isset($post['Customer']['Shipping']['company']) ? $post['Customer']['Shipping']['company'] : ''),
+                    'email'      => $post['Customer']['Shipping']['email'],
+                    'phone'      => $post['Customer']['Shipping']['phone'],
+                    'address_1'  => $post['Customer']['Shipping']['street'],
+                    'address_2'  => '',
+                    'city'       => $post['Customer']['Shipping']['city'],
+                    'state'      => '',
+                    'postcode'   => $post['Customer']['Shipping']['zip'],
+                    'country'    => ''
+                );
+                if (isset($post['Customer']['Shipping']['country']) && $post['Customer']['Shipping']['country'] != '') {
+                    $shipping_address['country'] = $post['Customer']['Shipping']['country'];
+                } else {
+                    $shipping_address['country'] = $billing_address['country'];
+                }
+
+            } else {
+                $shipping_address = $billing_address;
+            }
+
+            foreach ($billing_address AS $key => $val) {
+                $billing_address[$key] = sanitize_text_field( $val );
+            }
+            foreach ($shipping_address AS $key => $val) {
+                $shipping_address[$key] = sanitize_text_field( $val );
+            }
+
+            // Save address when changed
+            if (
+                WC()->customer->get_billing_first_name() != $billing_address['first_name']
+                || WC()->customer->get_billing_last_name() != $billing_address['last_name']
+                || WC()->customer->get_billing_country() != strtoupper( $billing_address['country'] )
+                || WC()->customer->get_billing_address_1() != $billing_address['address_1']
+                || WC()->customer->get_billing_address_2() != $billing_address['address_2']
+                || WC()->customer->get_billing_city() != $billing_address['city']
+                || WC()->customer->get_billing_postcode() != $billing_address['postcode']
+                || WC()->customer->get_billing_phone() != $billing_address['phone']
+                || WC()->customer->get_billing_email() != $billing_address['email']
+
+                || WC()->customer->get_shipping_first_name() != $shipping_address['first_name']
+                || WC()->customer->get_shipping_last_name() != $shipping_address['last_name']
+                || WC()->customer->get_shipping_country() != strtoupper( $shipping_address['country'] )
+                || WC()->customer->get_shipping_address_1() != $shipping_address['address_1']
+                || WC()->customer->get_shipping_address_2() != $shipping_address['address_2']
+                || WC()->customer->get_shipping_city() != $shipping_address['city']
+                || WC()->customer->get_shipping_postcode() != $shipping_address['postcode']
+            ) {
+                WC()->customer->set_billing_first_name( $billing_address['first_name'] );
+                WC()->customer->set_billing_last_name( $billing_address['last_name'] );
+                WC()->customer->set_billing_country( strtoupper( $billing_address['country'] ) );
+                WC()->customer->set_billing_address_1( $billing_address['address_1'] );
+                WC()->customer->set_billing_address_2( $billing_address['address_2'] );
+                WC()->customer->set_billing_city( $billing_address['city'] );
+                WC()->customer->set_billing_postcode( $billing_address['postcode'] );
+                WC()->customer->set_billing_phone( $billing_address['phone'] );
+                WC()->customer->set_billing_email( $billing_address['email'] );
+
+                WC()->customer->set_shipping_first_name( $shipping_address['first_name'] );
+                WC()->customer->set_shipping_last_name( $shipping_address['last_name'] );
+                WC()->customer->set_shipping_country( strtoupper( $shipping_address['country'] ) );
+                WC()->customer->set_shipping_address_1( $shipping_address['address_1'] );
+                WC()->customer->set_shipping_address_2( $shipping_address['address_2'] );
+                WC()->customer->set_shipping_city( $shipping_address['city'] );
+                WC()->customer->set_shipping_postcode( $shipping_address['postcode'] );
+
+                WC()->customer->set_calculated_shipping( true );
+                WC()->customer->save();
+
+                WC()->cart->calculate_shipping();
+                WC()->cart->calculate_fees();
+                WC()->cart->calculate_totals();
+
+                wp_send_json_success(array('update_checkout' => true));
+            } else {
+                wp_send_json_success(array('update_checkout' => false));
+            }
+        }
+        wp_send_json_success(array('update_checkout' => false));
+        return false;
+    }
+
     function billmate_checkout_cart_callback_update() {
+
         if ( ! wp_verify_nonce( $_REQUEST['billmate_checkout_nonce'], 'billmate_checkout_nonce' ) ) {
             exit( 'Nonce can not be verified.' );
         }
@@ -504,48 +698,19 @@ class WC_Gateway_Billmate_Checkout extends WC_Gateway_Billmate
         $woocommerce->cart->calculate_shipping();
         $woocommerce->cart->calculate_fees();
         $woocommerce->cart->calculate_totals();
-        $orderId = $this->create_order();
+        $orderId = $this->save_wc_order();
         $order = wc_get_order($orderId);
         $billmate = $this->getBillmateConnection();
 
         $result = $billmate->getCheckout(array('PaymentData' => array('hash' => WC()->session->get( 'billmate_checkout_hash' ))));
 
-        $data = $this->updateCheckout($result,$order);
 
+        $data = $this->updateCheckout($result,$order);
         wp_send_json_success( $data );
     }
 
-    function create_order( $customer_email = '' ) {
-        if ( is_user_logged_in() ) {
-            global $current_user;
-            $customer_email = $current_user->user_email;
-        }
-        if ( '' == $customer_email ) {
-            $customer_email = 'no-reply@billmate.se';
-        }
-        if ( ! is_email( $customer_email ) ) {
-            return;
-        }
-        // Check quantities
-        global $woocommerce;
-        $result = $woocommerce->cart->check_cart_item_stock();
-        if ( is_wp_error( $result ) ) {
-            return $result->get_error_message();
-        }
 
-        if ( $customer_email ) {
-            // Customer is logged in
-            $orderId = $this->check_if_order_should_be_updated_or_created($customer_email);
-        } else {
-            // Customer is guest.
-            $orderId = $this->check_if_order_should_be_updated_or_created();
-        }
-        return $orderId;
-    }
-
-    function create_wc_order(){
-
-
+    function create_wc_order() {
         // Customer accounts.
         $customer_id = apply_filters( 'woocommerce_checkout_customer_id', get_current_user_id() );
 
@@ -563,11 +728,57 @@ class WC_Gateway_Billmate_Checkout extends WC_Gateway_Billmate
             throw new Exception( __( 'Error: Unable to create order. Please try again.', 'woocommerce' ) );
         }
 
-
         return $order;
     }
 
-    function check_if_order_should_be_updated_or_created($customer_email = ''){
+    /**
+     * Return WooCommerce order object
+     * Create new order when not available
+     */
+    public function get_wc_order()
+    {
+        $is_new_order = false;
+        if ( WC()->session->get( 'billmate_checkout_order' ) && wc_get_order( WC()->session->get( 'billmate_checkout_order' ) ) ) {
+            $order_id = WC()->session->get( 'billmate_checkout_order' );
+            $order   = wc_get_order( $order_id );
+        } else {
+            $order = $this->create_wc_order();
+            $is_new_order = true;
+        }
+
+        if(version_compare(WC_VERSION, '3.0.0', '>=')) {
+            $order_id = $order->get_id();
+        } else {
+            $order_id = $order->id;
+        }
+
+        if ($is_new_order == true) {
+            WC()->session->set( 'billmate_checkout_order', $order_id );
+        }
+        return $order;
+    }
+
+    /**
+     * Save WooCommerce order
+     * @return int WooCommerce order id
+     */
+
+    public function save_wc_order($customer_email = '')
+    {
+        if(version_compare(WC_VERSION, '3.0.0', '>=')) {
+            return $this->save_wc3_order($customer_email);
+        } else {
+            return $this->save_wc2_order($customer_email);
+        }
+    }
+
+
+    /**
+     * Save WooCommerce order for WooCommerce version < 3.0.0
+     * @return int WooCommerce order id
+     */
+    public function save_wc2_order($customer_email = '')
+    {
         if ( ! defined( 'WOOCOMMERCE_CART' ) ) {
             define( 'WOOCOMMERCE_CART', true );
         }
@@ -745,10 +956,8 @@ class WC_Gateway_Billmate_Checkout extends WC_Gateway_Billmate
                 }
             }
 
-            $available_gateways = WC()->payment_gateways->payment_gateways();
-            $payment_method     = $available_gateways['billmate_checkout'];
-
             $order->set_payment_method( $payment_method );
+            $order->set_payment_method('billmate_checkout');
 
             if ( ! defined( 'WOOCOMMERCE_CHECKOUT' ) ) {
                 define( 'WOOCOMMERCE_CHECKOUT', true );
@@ -780,8 +989,112 @@ class WC_Gateway_Billmate_Checkout extends WC_Gateway_Billmate
         return $orderId;
     }
 
+    /**
+     * Save WooCommerce order for WooCommerce version >= 3.0.0
+     * @return int WooCommerce order id
+     */
+    public function save_wc3_order($customer_email = '') {
+
+        // Check quantities
+        global $woocommerce;
+        $result = $woocommerce->cart->check_cart_item_stock();
+        if ( is_wp_error( $result ) ) {
+            return $result->get_error_message();
+        }
+
+        $customer_data = array(
+            'billing_first_name'    => WC()->customer->get_billing_first_name(),
+            'billing_last_name'     => WC()->customer->get_billing_last_name(),
+            'billing_company'       => WC()->customer->get_billing_company(),
+            'billing_country'       => WC()->customer->get_billing_country(),
+            'billing_address_1'     => WC()->customer->get_billing_address_1(),
+            'billing_address_2'     => WC()->customer->get_billing_address_2(),
+            'billing_city'          => WC()->customer->get_billing_city(),
+            'billing_postcode'      => WC()->customer->get_billing_postcode(),
+            'billing_phone'         => WC()->customer->get_billing_phone(),
+            'billing_email'         => WC()->customer->get_billing_email(),
+            'shipping_first_name'   => WC()->customer->get_shipping_first_name(),
+            'shipping_last_name'    => WC()->customer->get_shipping_last_name(),
+            'shipping_company'      => WC()->customer->get_shipping_company(),
+            'shipping_country'      => WC()->customer->get_shipping_country(),
+            'shipping_address_1'    => WC()->customer->get_shipping_address_1(),
+            'shipping_address_2'    => WC()->customer->get_shipping_address_2(),
+            'shipping_city'         => WC()->customer->get_shipping_city(),
+            'shipping_postcode'     => WC()->customer->get_shipping_postcode()
+        );
+
+        $order = $this->get_wc_order();
+        if(version_compare(WC_VERSION, '3.0.0', '>=')) {
+            $order_id = $order->get_id();
+        } else {
+            $order_id = $order->id;
+        }
+
+        WC()->cart->calculate_shipping();
+        WC()->cart->calculate_fees();
+        WC()->cart->calculate_totals();
+
+        if ( WC()->customer->get_billing_email() != '' ) {
+            $order->set_billing_first_name( WC()->customer->get_billing_first_name() );
+            $order->set_billing_last_name( WC()->customer->get_billing_last_name() );
+            $order->set_billing_company( WC()->customer->get_billing_company() );
+            $order->set_billing_country( WC()->customer->get_billing_country() );
+            $order->set_billing_address_1( WC()->customer->get_billing_address_1() );
+            $order->set_billing_address_2( WC()->customer->get_billing_address_2() );
+            $order->set_billing_city( WC()->customer->get_billing_city() );
+            $order->set_billing_postcode( WC()->customer->get_billing_postcode() );
+            $order->set_billing_phone( WC()->customer->get_billing_phone() );
+            $order->set_billing_email( WC()->customer->get_billing_email() );
+
+            $order->set_shipping_first_name( WC()->customer->get_shipping_first_name() );
+            $order->set_shipping_last_name( WC()->customer->get_shipping_last_name() );
+            $order->set_shipping_company( WC()->customer->get_shipping_company() );
+            $order->set_shipping_country( WC()->customer->get_shipping_country() );
+            $order->set_shipping_address_1( WC()->customer->get_shipping_address_1() );
+            $order->set_shipping_address_2( WC()->customer->get_shipping_address_2() );
+            $order->set_shipping_city( WC()->customer->get_shipping_city() );
+            $order->set_shipping_postcode( WC()->customer->get_shipping_postcode() );
+        }
+
+
+        $order->remove_order_items();
+
+        $order->set_created_via( 'checkout' );
+        $order->set_customer_id( apply_filters( 'woocommerce_checkout_customer_id', get_current_user_id() ) );
+        $order->set_currency( get_woocommerce_currency() );
+        $order->set_prices_include_tax( 'yes' === get_option( 'woocommerce_prices_include_tax' ) );
+        $order->set_customer_ip_address( WC_Geolocation::get_ip_address() );
+        $order->set_customer_user_agent( wc_get_user_agent() );
+        $order->set_payment_method('billmate_checkout');
+        $order->set_shipping_total( WC()->cart->get_shipping_total() );
+        $order->set_discount_total( WC()->cart->get_discount_total() );
+        $order->set_discount_tax( WC()->cart->get_discount_tax() );
+        $order->set_cart_tax( WC()->cart->get_cart_contents_tax() + WC()->cart->get_fee_tax() );
+        $order->set_shipping_tax( WC()->cart->get_shipping_tax() );
+        $order->set_total( WC()->cart->get_total( 'edit' ) );
+
+        $order->calculate_taxes();
+        $order->calculate_shipping();
+        $order->calculate_totals();
+
+        WC()->checkout->create_order_line_items( $order, WC()->cart );
+        WC()->checkout->create_order_fee_lines( $order, WC()->cart );
+        WC()->checkout->create_order_shipping_lines( $order, WC()->session->get( 'chosen_shipping_methods' ), WC()->shipping->get_packages() );
+        WC()->checkout->create_order_tax_lines( $order, WC()->cart );
+        WC()->checkout->create_order_coupon_lines( $order, WC()->cart );
+
+        $order->save();
+
+        WC()->cart->calculate_shipping();
+        WC()->cart->calculate_fees();
+        WC()->cart->calculate_totals();
+
+        return $order_id;
+    }
+
+
     function get_url(){
-        $orderId = $this->create_order();
+        $orderId = $this->save_wc_order();
         if( WC()->session->get( 'billmate_checkout_hash' )){
             $billmate = $this->getBillmateConnection();
 
@@ -812,6 +1125,10 @@ class WC_Gateway_Billmate_Checkout extends WC_Gateway_Billmate
 
         global $woocommerce;
         $order = new WC_order( $orderId );
+
+        $order->calculate_taxes();
+        $order->calculate_shipping();
+        $order->calculate_totals();
 
         $billmateOrder = new BillmateOrder($order);
 

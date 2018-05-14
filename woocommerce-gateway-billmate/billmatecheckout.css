@@ -11,10 +11,11 @@
 
 
 #checkoutdiv {
-    clear: both;
+    float: left;
     display: block;
     overflow: auto;
     position: relative;
+    width: 100%;
 }
 
 form.woocommerce-shipping-calculator,
@@ -32,4 +33,41 @@ form.woocommerce-shipping-calculator,
 .woocommerce-page #content table.cart td.actions .input-text,
 .woocommerce-page table.cart td.actions .input-text{
     width: 140px !important
+}
+
+
+@media screen and ( max-width: 782px ) {
+    #billmate-checkout-wrapper .order-review {
+        margin-bottom: 40px;
+    }
+}
+
+@media only screen and (min-width : 768px) {
+    #billmate-checkout-wrapper .order-review {
+        float: left;
+        padding-right: 14px;
+    }
+
+    #billmate-checkout-iframe-wrapper {
+        float: right;
+    }
+}
+
+@media only screen and (min-width : 869px) {
+    #billmate-checkout-wrapper .order-review {
+        width: 38%;
+    }
+    #billmate-checkout-iframe-wrapper {
+        width: 62%;
+    }
+}
+
+@media only screen and (min-width : 768px) and (max-width : 868px) {
+    #billmate-checkout-wrapper .order-review {
+        width: 42%;
+    }
+
+    #billmate-checkout-iframe-wrapper {
+        width: 57%;
+    }
 }

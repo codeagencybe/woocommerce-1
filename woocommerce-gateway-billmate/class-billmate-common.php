@@ -20,8 +20,20 @@ class BillmateCommon {
         add_action( 'woocommerce_order_status_completed',array($this,'activate_invoice'));
 		add_filter('woocommerce_payment_successful_result',array($this,'clear_pno'));
 
+        add_filter( 'woocommerce_is_checkout', array($this, 'filter_woocommerce_is_checkout'));
 
 	}
+
+
+    public function filter_woocommerce_is_checkout()
+    {
+        global $post;
+        $checkoutSettings = get_option("woocommerce_billmate_checkout_settings", array());
+        if(isset($checkoutSettings['checkout_url']) AND $checkoutSettings['checkout_url'] == $post->ID) {
+            return true;
+        }
+        return false;
+    }
 
 	public function activate_invoice($order_id)
 	{

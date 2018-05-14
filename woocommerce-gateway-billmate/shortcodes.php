@@ -48,6 +48,11 @@ function return_billmate_price() {
 		return $billmate_partpayment_shortcode_price;
 }
 
+function show_billmate_checkout()
+{
+    echo get_billmate_checkout();
+}
+
 function get_billmate_checkout() {
 
     if (!defined('DONOTCACHEPAGE')) {

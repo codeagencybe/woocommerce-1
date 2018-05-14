@@ -15,52 +15,34 @@ var BillmateIframe = new function(){
     var currentCustomerBillingZip;
 
     this.updateAddress = function (data) {
-        // When address in checkout updates;
         data.action = 'billmate_update_address';
 
         if (data.hasOwnProperty('Customer') && data.hasOwnProperty('billingAddress')) {
             data.Customer.Billing = data.billingAddress;
         }
 
-        /**
-         * Support WooCommerce Shipping calculation
-         */
-         if (   jQuery('form.woocommerce-shipping-calculator').length > 0
-                && jQuery('#calc_shipping_postcode').length > 0) {
-            zip = '';
-            if (data.hasOwnProperty('Customer') && data.Customer.hasOwnProperty('Billing') && data.Customer.Billing.hasOwnProperty('zip') && data.Customer.Billing.zip != '') {
-                zip = data.Customer.Billing.zip.replace(/[^0-9\.]/g, '');
-            }
-            if (data.hasOwnProperty('Customer') && data.Customer.hasOwnProperty('Shipping') && data.Customer.Shipping.hasOwnProperty('zip') && data.Customer.Shipping.zip != '') {
-                zip = data.Customer.Shipping.zip.replace(/[^0-9\.]/g, '');
-            }
-            if (zip != '' && (zip != this.currentCustomerBillingZip || zip != jQuery('#calc_shipping_postcode').val())) {
-                this.currentCustomerBillingZip = zip;
-                jQuery('#calc_shipping_postcode').val(zip);
-                jQuery('form.woocommerce-shipping-calculator').submit();
-            }
-         }
-
-        self.showCheckoutLoading();
         jQuery.ajax({
             url : billmate.ajax_url,
             data: data,
             type: 'POST',
             success: function(response){
-
                 if(response.hasOwnProperty("success") && response.success) {
                     window.address_selected = true;
+                    if (response.hasOwnProperty('data') && response.data.hasOwnProperty('update_checkout') && response.data.update_checkout == true) {
+                        self.lock();
+                        jQuery( document.body ).trigger('update_checkout');
+                    }
                 }
-                self.hideCheckoutLoading();
             }
         });
-
     };
+
     this.updateBillmate = function(){
+
         self.showCheckoutLoading();
         jQuery.ajax({
             url : billmate.ajax_url,
-            data: {action: 'billmate_update_address',hash: window.hash},
+            data: {action: 'billmate_update_order',hash: window.hash},
             type: 'POST',
             success: function(response){
 
@@ -132,34 +114,15 @@ var BillmateIframe = new function(){
     this.initListeners = function () {
         jQuery(document).ready(function () {
             window.addEventListener("message",self.handleEvent);
-
         });
 
-        /* Listen to WooCommerce checkout elements */
-        jQuery(document).on('click', "input[name='update_cart']", function() {
-            self.lock();
-        });
-        jQuery( document ).on('click', 'div.woocommerce > form input[type=submit]', function() {
-            self.lock();
-        });
-        jQuery( document ).on('keypress', 'div.woocommerce > form input[type=number]', function() {
-            self.lock();
-        });
-        jQuery( document ).on('submit', 'div.woocommerce:not(.widget_product_search) > form', function() {
-            self.lock();
-        });
-        jQuery( document ).on('click', 'a.woocommerce-remove-coupon', function() {
-            self.lock();
-        });
-        jQuery( document ).on('click', 'td.product-remove > a', function() {
-            self.lock();
-        });
-        jQuery( document ).on('change', 'select.shipping_method, input[name^=shipping_method]', function() {
+
+        jQuery(document.body).on('update_checkout', function(e) {
             self.lock();
         });
 
         /* Updated cart totals */
-        jQuery(document.body).on('updated_cart_totals',function(e){
+        jQuery(document.body).on('updated_checkout', function(e){
             self.updateBillmate();
         });
 
